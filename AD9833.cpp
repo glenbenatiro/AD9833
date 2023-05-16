@@ -1,7 +1,7 @@
 #include "AD9833.h"
 
-#include <cstdio>
-#include <iostream>
+#include <thread>
+#include <cmath>
 
 AD9833::
 AD9833 ()
@@ -9,14 +9,35 @@ AD9833 ()
 
 }
 
+AD9833::
+~AD9833 ()
+{
+
+}
+
 void AD9833:: 
 update_ctrl_reg ()
 {
-  m_txbuff[0] = 0x00 | (m_B28 << 5) | (m_HLB << 4) | (m_FSELECT << 3) |
-    (m_PSELECT << 2) | m_Reset;
-        
-  m_txbuff[1] = 0x00 | (m_SLEEP1 << 7) | (m_SLEEP12 << 6) | 
-    (m_OPBITEN << 5) | (m_DIV2 << 3) | (m_Mode << 1);
+  uint16_t cmd =  0         << 15 |
+                  0         << 14 |
+                  m_B28     << 13 |
+                  m_HLB     << 12 |
+                  m_FSELECT << 11 |
+                  m_PSELECT << 10 |
+                  0         <<  9 |
+                  m_Reset   <<  8 |
+                  m_SLEEP1  <<  7 |
+                  m_SLEEP12 <<  6 |
+                  m_OPBITEN <<  5 | 
+                  0         <<  4 |
+                  m_DIV2    <<  3 |
+                  0         <<  2 |
+                  m_Mode    <<  1 |
+                  0         <<  0 ;
+  
+  // most significant byte first according to datasheet
+  m_txbuff[1] = cmd & 0x00FF;
+  m_txbuff[0] = (cmd >> 8) & 0x00FF;
 
   write_reg ();
 }
@@ -25,6 +46,8 @@ void AD9833::
 write_reg ()
 {
   spi_xfer (m_rxbuff, m_txbuff, 2);
+
+  std::this_thread::sleep_for (std::chrono::microseconds (10));
 }
 
 void AD9833::
@@ -60,14 +83,26 @@ set_write_mode (bool value)
 void AD9833:: 
 run ()
 {
-  m_Reset = 0;
+  unreset ();
+}
+
+void AD9833:: 
+stop ()
+{
+  reset ();
+}
+
+void AD9833:: 
+reset ()
+{
+  m_Reset = 1;
   update_ctrl_reg ();
 }
 
 void AD9833:: 
-stop () 
+unreset ()
 {
-  m_Reset = 1;
+  m_Reset = 0;
   update_ctrl_reg ();
 }
 
@@ -77,74 +112,94 @@ wave_type (WAVE_TYPE value)
   switch (value)
   {
     case WAVE_TYPE::SINE:
+    {  
       m_OPBITEN = 0;
-      m_DIV2 = 0;
-      m_Mode = 0;
+      m_Mode    = 0;
+
       break;
+    }
+
     case WAVE_TYPE::TRIANGLE:
+    {  
       m_OPBITEN = 0;
-      m_DIV2 = 0;
-      m_Mode = 1;
+      m_Mode    = 1;
+    
       break;
-    case WAVE_TYPE::SQUARE_FULL:
-      m_OPBITEN = 1;
-      m_DIV2 = 1;
-      m_Mode = 0;
-      break;
+    }
+
     case WAVE_TYPE::SQUARE_HALF:
+    {  
       m_OPBITEN = 1;
-      m_DIV2 = 0;
-      m_Mode = 0;
+      m_Mode    = 0;
+      m_DIV2    = 0;
+    
       break;
+    }
+
     case WAVE_TYPE::SQUARE:
-      wave_type (WAVE_TYPE::SQUARE_FULL);
+    case WAVE_TYPE::SQUARE_FULL:
+    {  
+      m_OPBITEN = 1;
+      m_Mode    = 0;
+      m_DIV2    = 1;
+      
       break;
+    }   
+    
     case WAVE_TYPE::DC:
-      // add here code for DC signal
-      break;
-    default:
+    {
       wave_type (WAVE_TYPE::SINE);
+      stop ();
+
       break;
+    }
   }
 
-  update_ctrl_reg ();
+  if (value != WAVE_TYPE::DC)
+  {
+    update_ctrl_reg ();
+    run             ();
+  }  
 }
 
 void AD9833:: 
-frequency (double frequency)
+frequency (double value)
 {
-  if ((frequency <= MAX_FREQUENCY) && (frequency >= MIN_FREQUENCY))
+  if ((value <= MAX_FREQUENCY) && (value >= MIN_FREQUENCY))
   {
-    uint32_t divider = ((frequency * POW_2_28) / 
-    static_cast<double>(REFERENCE_CLOCK_FREQUENCY));
+    uint32_t divider = ((value * POW_2_28) / REFERENCE_CLOCK_FREQUENCY);
     divider &= 0x0FFFFFFF;
 
     if (m_B28 == 1)
     {
-      m_txbuff[0] = 0x00 | ((m_FSELECT + 1) << 6) | ((divider >> 8) & 0x3F);
-      m_txbuff[1] = divider & 0xFF;
+      uint16_t upper  = (m_FSELECT + 1) << 14 | ((divider >> 14) & 0x3FFF);
+      uint16_t lower  = (m_FSELECT + 1) << 14 | (divider & 0x3FFF);
+      
+      m_txbuff[0] = (lower >> 8) & 0xFF;
+      m_txbuff[1] = lower & 0xFF;
       write_reg ();
 
-      divider >>= 14;
-
-      m_txbuff[0] = 0x00 | ((m_FSELECT + 1) << 6) | ((divider >> 8) & 0x3F);
-      m_txbuff[1] = divider & 0xFF;
+      m_txbuff[0] = (upper >> 8) & 0xFF;
+      m_txbuff[1] = upper & 0xFF;
       write_reg ();
     } 
-    else if (m_B28 == 0)
+    else if (m_B28 == 0) 
     {
-      set_HLB (0);
-      m_txbuff[0] = 0x00 | ((m_FSELECT + 1) << 6) | ((divider >> 8) & 0x3F);
-      m_txbuff[1] = divider & 0xFF;
-      write_reg ();
+      uint16_t upper  = (m_FSELECT + 1) << 14 | ((divider >> 14) & 0x3FFF);
+      uint16_t lower  = (m_FSELECT + 1) << 14 | (divider & 0x3FFF);
 
-      divider >>= 14;
+      set_HLB (0); 
+      m_txbuff[0] = (lower >> 8) & 0xFF;
+      m_txbuff[1] = lower & 0xFF;
+      write_reg ();
 
       set_HLB (1);
-      m_txbuff[0] = 0x00 | ((m_FSELECT + 1) << 6) | ((divider >> 8) & 0x3F);
-      m_txbuff[1] = divider & 0xFF;
+      m_txbuff[0] = (upper >> 8) & 0xFF;
+      m_txbuff[1] = upper & 0xFF;
       write_reg ();
     }
+
+    m_frequency = REFERENCE_CLOCK_FREQUENCY / divider;
   }
 }
 
@@ -155,9 +210,15 @@ period (double value)
 }
 
 void AD9833:: 
-phase (double phase)
+phase (double value, bool phase_reg)
 {
+  uint16_t phase  = (std::fmod (value, 360.0) * 4096) / (2 * 3.141592653);
+  uint16_t data   = (3 << 14) | (phase_reg << 13) | (phase & 0xFFF);
 
+  m_txbuff[0] = (data >> 8) & 0xFF;
+  m_txbuff[1] = data & 0xFF;
+
+  write_reg ();
 }
 
 // EOF
